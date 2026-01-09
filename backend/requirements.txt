@@ -1,0 +1,14 @@
+fastapi==0.115.0
+uvicorn[standard]==0.32.0
+sqlalchemy==2.0.36
+python-multipart==0.0.17
+pydantic==2.9.2
+pydantic-settings==2.6.1
+faster-whisper==1.0.3
+openai==0.28.1
+yt-dlp==2024.12.23
+pydub==0.25.1
+python-dotenv==1.0.1
+cryptography==44.0.0
+aiofiles==24.1.0
+httpx==0.28.0
