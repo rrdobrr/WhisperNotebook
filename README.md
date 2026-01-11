@@ -1,4 +1,4 @@
-# WhisperTranscriber
+# WhisperNotebook
 
 Веб-приложение для транскрибации аудио/видео с AI-чатом и редактором текстов.
 
@@ -24,7 +24,7 @@
 
 1. В Railway нажмите **New Project**
 2. Выберите **Deploy from GitHub repo**
-3. Выберите ваш форкнутый репозиторий `WhisperTranscriber`
+3. Выберите ваш форкнутый репозиторий `WhisperNotebook`
 4. Railway автоматически начнет сборку
 
 ### 3. Настройка Volume
