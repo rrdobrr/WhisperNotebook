@@ -42,6 +42,7 @@ RUN apt-get update && apt-get install -y \
 # Copy backend
 COPY --from=backend /app/backend /app/backend
 COPY --from=backend /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
+COPY --from=backend /usr/local/bin /usr/local/bin
 
 # Copy frontend build
 COPY --from=frontend-build /app/frontend/dist /app/frontend/dist
@@ -51,11 +52,12 @@ RUN mkdir -p /app/uploads /app/temp /app/data /app/data/models
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/app/backend
 ENV DATABASE_URL=sqlite:////app/data/whispertranscriber.db
 ENV TRANSFORMERS_CACHE=/app/data/models
 ENV HF_HOME=/app/data/models
 
-EXPOSE 8000
+EXPOSE 8080
 
-# Start backend
-CMD ["uvicorn", "backend.app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Start backend (use shell form to support environment variables)
+CMD python -m uvicorn backend.app.main:app --host 0.0.0.0 --port ${PORT:-8080}

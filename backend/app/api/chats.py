@@ -89,7 +89,9 @@ async def send_message(
     db.refresh(user_message)
 
     # Handle text attachments
+    llm_content = message_data.content  # Content to send to LLM
     if message_data.text_ids:
+        llm_content += "\n\n"
         for idx, text_id in enumerate(message_data.text_ids):
             text = db.query(Text).filter(Text.id == text_id).first()
             if text:
@@ -99,15 +101,30 @@ async def send_message(
                     order=idx
                 )
                 db.add(attachment)
+                llm_content += f"\n\n--- Текстовое вложение {idx + 1} ---\n{text.content}\n"
         db.commit()
 
     # Get chat history
     messages = db.query(ChatMessage).filter(ChatMessage.chat_id == chat_id).order_by(ChatMessage.created_at).all()
 
+    # Build messages for LLM with concatenated attachments for the last user message
+    llm_messages = []
+    for msg in messages:
+        if msg.id == user_message.id:
+            # Use the content with concatenated attachments for the current message
+            llm_messages.append({"role": msg.role, "content": llm_content})
+        else:
+            # For previous messages, reconstruct with attachments if they exist
+            content = msg.content
+            if msg.attachments:
+                for idx, att in enumerate(msg.attachments):
+                    content += f"\n\n--- Текстовое вложение {idx + 1} ---\n{att.text.content}\n"
+            llm_messages.append({"role": msg.role, "content": content})
+
     # Generate response
     try:
         response_text, tokens, cost = LLMService.chat_completion(
-            messages=[{"role": msg.role, "content": msg.content} for msg in messages],
+            messages=llm_messages,
             model=chat.model
         )
 
@@ -149,6 +166,9 @@ async def send_message_stream(
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not found")
 
+    # Extract model before session might close
+    model = chat.model
+
     # Create user message
     user_message = ChatMessage(
         chat_id=chat_id,
@@ -160,8 +180,9 @@ async def send_message_stream(
     db.refresh(user_message)
 
     # Handle text attachments
+    llm_content = message_data.content
     if message_data.text_ids:
-        formatted_content = message_data.content + "\n\n"
+        llm_content += "\n\n"
         for idx, text_id in enumerate(message_data.text_ids):
             text = db.query(Text).filter(Text.id == text_id).first()
             if text:
@@ -171,32 +192,48 @@ async def send_message_stream(
                     order=idx
                 )
                 db.add(attachment)
-                formatted_content += f"\n\n--- Текстовое вложение {idx + 1} ---\n{text.content}\n"
-
-        user_message.content = formatted_content
+                llm_content += f"\n\n--- Текстовое вложение {idx + 1} ---\n{text.content}\n"
         db.commit()
 
-    # Get chat history
+    # Get chat history and build messages for LLM
     messages = db.query(ChatMessage).filter(ChatMessage.chat_id == chat_id).order_by(ChatMessage.created_at).all()
 
+    llm_messages = []
+    for msg in messages:
+        if msg.id == user_message.id:
+            # Use content with concatenated attachments for current message
+            llm_messages.append({"role": msg.role, "content": llm_content})
+        else:
+            # For previous messages, reconstruct with attachments
+            content = msg.content
+            if msg.attachments:
+                for idx, att in enumerate(msg.attachments):
+                    content += f"\n\n--- Текстовое вложение {idx + 1} ---\n{att.text.content}\n"
+            llm_messages.append({"role": msg.role, "content": content})
+
     def generate():
+        from app.database import get_db
         try:
             full_response = ""
             for chunk in LLMService.chat_completion_stream(
-                messages=[{"role": msg.role, "content": msg.content} for msg in messages],
-                model=chat.model
+                messages=llm_messages,
+                model=model
             ):
                 full_response += chunk
                 yield f"data: {chunk}\n\n"
 
-            # Save assistant message
-            assistant_message = ChatMessage(
-                chat_id=chat_id,
-                role="assistant",
-                content=full_response
-            )
-            db.add(assistant_message)
-            db.commit()
+            # Create new session for saving the result
+            db_gen = next(get_db())
+            try:
+                assistant_message = ChatMessage(
+                    chat_id=chat_id,
+                    role="assistant",
+                    content=full_response
+                )
+                db_gen.add(assistant_message)
+                db_gen.commit()
+            finally:
+                db_gen.close()
 
             yield "data: [DONE]\n\n"
         except Exception as e:
@@ -207,9 +244,30 @@ async def send_message_stream(
 @router.get("/{chat_id}/messages", response_model=List[MessageResponse])
 async def get_messages(chat_id: int, db: Session = Depends(get_db)):
     """Get all messages in chat"""
+    from app.models.schemas import AttachmentInfo
+
     chat = db.query(Chat).filter(Chat.id == chat_id).first()
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not found")
 
     messages = db.query(ChatMessage).filter(ChatMessage.chat_id == chat_id).order_by(ChatMessage.created_at).all()
-    return messages
+
+    # Convert to response format with attachments
+    result = []
+    for msg in messages:
+        attachments = [
+            AttachmentInfo(text_id=att.text_id, title=att.text.title)
+            for att in msg.attachments
+        ]
+        result.append(MessageResponse(
+            id=msg.id,
+            chat_id=msg.chat_id,
+            role=msg.role,
+            content=msg.content,
+            tokens=msg.tokens,
+            cost=msg.cost,
+            created_at=msg.created_at,
+            attachments=attachments
+        ))
+
+    return result

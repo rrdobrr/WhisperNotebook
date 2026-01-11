@@ -1,6 +1,7 @@
 import axios from 'axios'
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+// Auto-detect API URL: empty for production (same domain), localhost for development
+const API_BASE_URL = window.location.hostname === 'localhost' ? 'http://localhost:8000' : ''
 
 const apiClient = axios.create({
   baseURL: API_BASE_URL,
@@ -9,18 +10,57 @@ const apiClient = axios.create({
   },
 })
 
+// Request interceptor: Add JWT token to all requests
+apiClient.interceptors.request.use(
+  (config) => {
+    const token = localStorage.getItem('auth_token')
+    if (token) {
+      config.headers.Authorization = `Bearer ${token}`
+    }
+    return config
+  },
+  (error) => {
+    return Promise.reject(error)
+  }
+)
+
+// Response interceptor: Handle 401 errors (expired/invalid token)
+apiClient.interceptors.response.use(
+  (response) => {
+    return response
+  },
+  (error) => {
+    if (error.response?.status === 401) {
+      // Token is invalid or expired
+      localStorage.removeItem('auth_token')
+
+      // Only redirect to login if we're not already on the login page
+      if (!window.location.pathname.includes('/login')) {
+        window.location.href = '/login'
+      }
+    }
+    return Promise.reject(error)
+  }
+)
+
 // Transcriptions (now using texts API)
 export const transcriptionAPI = {
-  uploadFile: (formData, onProgress) =>
-    apiClient.post('/api/texts/upload', formData, {
-      headers: { 'Content-Type': 'multipart/form-data' },
+  uploadFile: (formData, onProgress) => {
+    // Use apiClient to get automatic token injection
+    // Remove Content-Type header to let axios set it with proper boundary for multipart/form-data
+    const config = {
       onUploadProgress: onProgress,
-    }),
+      headers: {
+        'Content-Type': undefined, // Let axios set the correct multipart boundary
+      },
+    }
+    return apiClient.post('/api/texts/upload', formData, config)
+  },
 
-  transcribeYoutube: (data) =>
-    apiClient.post('/api/texts/youtube', data, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-    }),
+  transcribeYoutube: (data) => {
+    // Use apiClient to get automatic token injection
+    return apiClient.post('/api/texts/youtube', data)
+  },
 
   getAll: (params) => apiClient.get('/api/texts/', { params: { ...params, status: 'processing' } }),
   getById: (id) => apiClient.get(`/api/texts/${id}`),
@@ -48,10 +88,47 @@ export const chatAPI = {
   delete: (id) => apiClient.delete(`/api/chats/${id}`),
   getMessages: (id) => apiClient.get(`/api/chats/${id}/messages`),
   sendMessage: (id, data) => apiClient.post(`/api/chats/${id}/messages`, data),
-  sendMessageStream: (id, data) => {
-    // Return EventSource for SSE
-    const params = new URLSearchParams(data)
-    return new EventSource(`${API_BASE_URL}/api/chats/${id}/messages/stream?${params}`)
+  sendMessageStream: async (id, data, onChunk) => {
+    const token = localStorage.getItem('auth_token')
+    const headers = {
+      'Content-Type': 'application/json',
+    }
+
+    if (token) {
+      headers.Authorization = `Bearer ${token}`
+    }
+
+    const response = await fetch(`${API_BASE_URL}/api/chats/${id}/messages/stream`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(data),
+    })
+
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() // Keep incomplete line in buffer
+
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          const data = line.slice(6)
+          if (data === '[DONE]') {
+            return
+          }
+          if (data.startsWith('[ERROR]')) {
+            throw new Error(data.slice(8))
+          }
+          onChunk(data)
+        }
+      }
+    }
   },
 }
 
@@ -60,6 +137,7 @@ export const settingsAPI = {
   get: () => apiClient.get('/api/settings/'),
   update: (data) => apiClient.put('/api/settings/', data),
   getOpenAIBalance: () => apiClient.get('/api/settings/openai-balance'),
+  getOpenAIKeyStatus: () => apiClient.get('/api/settings/openai-key-status'),
   testOpenAIKey: (apiKey) => apiClient.post('/api/settings/test-openai-key', { api_key: apiKey }),
   downloadModel: () => apiClient.post('/api/settings/download-model'),
   getModelStatus: () => apiClient.get('/api/settings/model-status'),
@@ -71,6 +149,16 @@ export const costsAPI = {
   getHistory: (params) => apiClient.get('/api/costs/history', { params }),
   getDaily: (days) => apiClient.get('/api/costs/daily', { params: { days } }),
   updateRailway: (amount, details) => apiClient.post('/api/costs/railway/update', { amount, details }),
+}
+
+// Authentication
+export const authAPI = {
+  login: (credentials) => apiClient.post('/api/auth/login', credentials),
+  verify: (token) => apiClient.get('/api/auth/verify', { params: { token } }),
+  logout: () => {
+    localStorage.removeItem('auth_token')
+    window.location.href = '/login'
+  },
 }
 
 export default apiClient

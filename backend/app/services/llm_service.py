@@ -1,9 +1,7 @@
-import openai
+from openai import OpenAI
 from typing import List, Dict
 import os
 
-from app.database import SessionLocal, Settings, Cost
-from app.services.encryption_service import decrypt_api_key
 from app.config import config
 
 # Import mock service if in demo mode
@@ -13,20 +11,16 @@ if config.is_demo_mode():
 class LLMService:
     @staticmethod
     def get_api_key() -> str:
-        """Get OpenAI API key from settings"""
+        """Get OpenAI API key from environment variable"""
         # In demo mode, return fake key
         if config.is_demo_mode():
             return "demo-key"
 
-        db = SessionLocal()
-        try:
-            settings = db.query(Settings).first()
-            if not settings or not settings.openai_api_key:
-                raise Exception("OpenAI API key not configured. Please add it in settings.")
+        api_key = config.OPENAI_API_KEY
+        if not api_key:
+            raise Exception("OpenAI API key not configured. Please set OPENAI_API_KEY environment variable.")
 
-            return decrypt_api_key(settings.openai_api_key)
-        finally:
-            db.close()
+        return api_key
 
     @staticmethod
     def calculate_cost(model: str, prompt_tokens: int, completion_tokens: int) -> float:
@@ -51,9 +45,9 @@ class LLMService:
             return MockLLMService.chat_completion(messages, model)
 
         api_key = cls.get_api_key()
-        openai.api_key = api_key
+        client = OpenAI(api_key=api_key)
 
-        response = openai.ChatCompletion.create(
+        response = client.chat.completions.create(
             model=model,
             messages=messages
         )
@@ -74,32 +68,61 @@ class LLMService:
             return
 
         api_key = cls.get_api_key()
-        openai.api_key = api_key
+        client = OpenAI(api_key=api_key)
 
-        response = openai.ChatCompletion.create(
+        stream = client.chat.completions.create(
             model=model,
             messages=messages,
             stream=True
         )
 
-        for chunk in response:
-            if chunk.choices[0].delta.get("content"):
+        for chunk in stream:
+            if chunk.choices[0].delta.content:
                 yield chunk.choices[0].delta.content
 
     @classmethod
-    def summarize(cls, text: str, model: str = "gpt-4") -> str:
-        """Summarize text"""
+    def summarize(cls, text: str, model: str = "gpt-4", custom_prompt: str = None) -> tuple[str, int, float]:
+        """Summarize text and return summary, tokens, and cost"""
         # Use mock service in demo mode
         if config.is_demo_mode():
-            return MockLLMService.summarize(text, model)
+            summary = MockLLMService.summarize(text, model)
+            return summary, 0, 0.0
+
+        # Default prompt if no custom prompt provided
+        default_prompt = """Создай подробный структурированный конспект следующего текста.
+
+КРИТИЧЕСКИ ВАЖНО - Сохранение оригинальности:
+- ОБЯЗАТЕЛЬНО сохраняй все оригинальные термины, названия, понятия и специфические формулировки из текста
+- НЕ ЗАМЕНЯЙ авторские выражения на обобщенные или нормализованные варианты
+- Если автор использует необычные, специфические или придуманные слова - переноси их в конспект БЕЗ ИЗМЕНЕНИЙ
+- Сохраняй уникальный стиль и лексику автора
+- Если есть специализированная терминология - используй её точно как в оригинале
+
+Требования к структуре конспекта:
+- Выдели основные разделы и темы
+- Структурируй информацию с помощью заголовков и подзаголовков
+- Раскрой ключевые понятия и термины (сохраняя оригинальные формулировки)
+- Сохрани важные детали и примеры
+- Используй маркированные списки для перечислений
+- Используй нумерованные списки для последовательностей
+- Сохраняй логическую структуру оригинального текста
+
+Ответ должен быть на русском языке, но с сохранением ВСЕХ оригинальных терминов и формулировок из исходного текста.
+
+Текст для конспектирования:
+
+{text}"""
+
+        # Use custom prompt if provided, otherwise use default
+        user_prompt = custom_prompt if custom_prompt else default_prompt
 
         messages = [
-            {"role": "system", "content": "You are a helpful assistant that summarizes text concisely and accurately."},
-            {"role": "user", "content": f"Please provide a concise summary of the following text:\n\n{text}"}
+            {"role": "system", "content": "Ты полезный ассистент, который создает подробные структурированные конспекты текстов на русском языке, максимально сохраняя оригинальную терминологию и формулировки автора."},
+            {"role": "user", "content": user_prompt.replace("{text}", text)}
         ]
 
-        response, _, _ = cls.chat_completion(messages, model)
-        return response
+        response, tokens, cost = cls.chat_completion(messages, model)
+        return response, tokens, cost
 
     @classmethod
     def process_text(cls, text: str, prompt: str, model: str = "gpt-4") -> str:
@@ -116,36 +139,57 @@ class LLMService:
         response, _, _ = cls.chat_completion(messages, model)
         return response
 
-    @classmethod
-    def test_api_key(cls, api_key: str) -> bool:
-        """Test if API key is valid"""
-        # Always return true in demo mode
-        if config.is_demo_mode():
-            return MockLLMService.test_api_key(api_key)
-
-        try:
-            openai.api_key = api_key
-            openai.Model.list()
-            return True
-        except Exception:
-            return False
 
     @classmethod
     def get_balance(cls) -> dict:
-        """Get OpenAI account balance"""
+        """Get OpenAI account balance and usage information"""
         # Return demo balance in demo mode
         if config.is_demo_mode():
             return MockLLMService.get_balance()
 
+        import requests
         api_key = cls.get_api_key()
-        openai.api_key = api_key
 
         try:
-            # Note: OpenAI API doesn't provide balance endpoint directly
-            # This is a placeholder - you might need to use billing API or dashboard
-            return {
-                "available": "N/A",
-                "message": "Balance information not available via API. Please check your OpenAI dashboard."
+            headers = {
+                "Authorization": f"Bearer {api_key}"
             }
+
+            # Get subscription info
+            subscription_response = requests.get(
+                "https://api.openai.com/v1/dashboard/billing/subscription",
+                headers=headers
+            )
+
+            # Get credit grants (remaining balance)
+            credits_response = requests.get(
+                "https://api.openai.com/v1/dashboard/billing/credit_grants",
+                headers=headers
+            )
+
+            if subscription_response.status_code == 200 and credits_response.status_code == 200:
+                subscription_data = subscription_response.json()
+                credits_data = credits_response.json()
+
+                # Calculate total available credits
+                total_granted = sum(grant.get("granted_amount", 0) for grant in credits_data.get("grants", []))
+                total_used = sum(grant.get("used_amount", 0) for grant in credits_data.get("grants", []))
+                total_available = total_granted - total_used
+
+                return {
+                    "total_available": f"${total_available:.2f}",
+                    "total_granted": f"${total_granted:.2f}",
+                    "total_used": f"${total_used:.2f}",
+                    "hard_limit": f"${subscription_data.get('hard_limit_usd', 0):.2f}",
+                    "plan": subscription_data.get("plan", {}).get("title", "Unknown")
+                }
+            else:
+                return {
+                    "error": "Unable to fetch balance",
+                    "message": "Please check your OpenAI dashboard for billing information."
+                }
         except Exception as e:
-            raise Exception(f"Failed to get balance: {str(e)}")
+            return {
+                "error": str(e),
+                "message": "Please check your OpenAI dashboard for billing information."
+            }

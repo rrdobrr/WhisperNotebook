@@ -5,10 +5,12 @@ python-multipart==0.0.17
 pydantic==2.9.2
 pydantic-settings==2.6.1
 faster-whisper==1.0.3
-openai==0.28.1
+openai>=1.0.0
 yt-dlp==2024.12.23
 pydub==0.25.1
-python-dotenv==1.0.1
 cryptography==44.0.0
 aiofiles==24.1.0
 httpx==0.28.0
+huggingface-hub==0.26.5
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
